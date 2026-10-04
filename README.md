@@ -26,6 +26,7 @@ Semgrep, Trivy, and ZAP are the merge checks. Gitleaks runs on every pull reques
 - Each tool has its own workflow, so a team can turn a check on or off without editing the others.
 - Application repositories call these workflows with GitHub Actions `workflow_call`. A failed required check blocks the pull request.
 - Semgrep and Trivy run on every pull request. They do not need a deployed application.
+- Semgrep runs on every pull request with the Semgrep CLI and the `p/default` rules. An ERROR finding fails the check. Metrics are off.
 - Gitleaks runs on every pull request and scans the full git history. A finding fails the check. The default rules live in `.gitleaks.toml`.
 - Trivy runs on every pull request as one check with three steps: `trivy fs` for dependency files, `trivy image` for container images, and `trivy config` for other config. A missing target is reported as nothing to scan and does not fail the check. A HIGH or CRITICAL finding fails the check.
 - ZAP runs against a preview or staging URL. It starts in baseline mode so the first scans report findings without failing the build on unreviewed noise. It becomes a required check after the rules are tuned.
@@ -88,6 +89,7 @@ A caller workflow in the application repository, limited to inputs such as the l
 ```yaml
 jobs:
   semgrep:
+    name: Semgrep
     uses: kcmchandramouli/edf/.github/workflows/semgrep.yml@master
   gitleaks:
     name: Gitleaks
@@ -102,4 +104,4 @@ jobs:
       target_url: ${{ inputs.target_url }}
 ```
 
-Those `uses` paths are the intended contract. Gitleaks and Trivy are in place. The other workflow files are part of the next implementation phase.
+Those `uses` paths are the intended contract. Semgrep, Gitleaks, and Trivy are in place. The other workflow files are part of the next implementation phase.

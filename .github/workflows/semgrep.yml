@@ -1,0 +1,65 @@
+name: Semgrep
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Semgrep configs, separated by spaces. Example p/java p/security-audit.
+        required: false
+        type: string
+        default: "p/default"
+      semgrep_version:
+        description: Semgrep release version.
+        required: false
+        type: string
+        default: "1.179.0"
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v6
+
+      - name: Install Semgrep
+        env:
+          SEMGREP_VERSION: ${{ inputs.semgrep_version }}
+        run: |
+          version="$SEMGREP_VERSION"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid semgrep version: $version"
+            exit 1
+          fi
+          python3 -m pip install --user "semgrep==${version}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/semgrep" --version
+
+      - name: Scan
+        env:
+          SEMGREP_CONFIG: ${{ inputs.config }}
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          mkdir -p semgrep-reports
+          args=()
+          for config in $SEMGREP_CONFIG; do
+            args+=(--config "$config")
+          done
+          semgrep scan \
+            --metrics=off \
+            --error \
+            --severity ERROR \
+            --sarif \
+            --output semgrep-reports/semgrep.sarif \
+            "${args[@]}"
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: semgrep-report
+          path: semgrep-reports/
+          if-no-files-found: ignore
