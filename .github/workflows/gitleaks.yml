@@ -1,0 +1,87 @@
+name: Gitleaks
+
+# Open-source Gitleaks CLI. Organization repos do not need a gitleaks-action license.
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        description: Config file in the application repository. Empty uses the edf default.
+        required: false
+        type: string
+        default: ""
+      gitleaks_version:
+        description: Gitleaks release version.
+        required: false
+        type: string
+        default: "8.30.1"
+    secrets:
+      checkout_token:
+        description: Token that can read edf. Required only when edf is private.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout edf rules
+        if: inputs.config_path == ''
+        uses: actions/checkout@v6
+        with:
+          repository: kcmchandramouli/edf
+          ref: master
+          path: .edf
+          token: ${{ secrets.checkout_token || github.token }}
+
+      - name: Install Gitleaks
+        env:
+          GITLEAKS_VERSION: ${{ inputs.gitleaks_version }}
+        run: |
+          version="$GITLEAKS_VERSION"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid gitleaks version: $version"
+            exit 1
+          fi
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          curl -sSfL -o "/tmp/${asset}" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
+          curl -sSfL -o /tmp/gitleaks_checksums.txt "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_checksums.txt"
+          line=$(grep " ${asset}$" /tmp/gitleaks_checksums.txt)
+          if [ -z "$line" ]; then
+            echo "Checksum entry not found for ${asset}"
+            exit 1
+          fi
+          printf '%s\n' "$line" | (cd /tmp && sha256sum -c -)
+          tar -xzf "/tmp/${asset}" -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        env:
+          CONFIG_PATH: ${{ inputs.config_path }}
+        run: |
+          config="$CONFIG_PATH"
+          if [ -z "$config" ]; then
+            config=".edf/.gitleaks.toml"
+          fi
+          gitleaks detect \
+            --source . \
+            --config "$config" \
+            --redact \
+            --exit-code 1 \
+            --report-format sarif \
+            --report-path gitleaks.sarif
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+          if-no-files-found: ignore
