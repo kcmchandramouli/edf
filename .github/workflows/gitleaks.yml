@@ -75,13 +75,12 @@ jobs:
             --config "$config" \
             --redact \
             --exit-code 1 \
-            --report-format sarif \
-            --report-path gitleaks.sarif
+            --report-format json \
+            --report-path gitleaks-report.json
 
       - name: Upload report
-        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: gitleaks-report
-          path: gitleaks.sarif
+          path: gitleaks-report.json
           if-no-files-found: ignore
