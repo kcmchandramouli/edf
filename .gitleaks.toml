@@ -1,0 +1,10 @@
+title = "edf gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore the edf checkout used only to load this config."
+paths = [
+  '''(^|/)\.edf(/|$)''',
+]
