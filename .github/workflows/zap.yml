@@ -1,0 +1,77 @@
+name: OWASP ZAP
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: Preview or staging URL to scan. Empty means nothing to scan.
+        required: false
+        type: string
+        default: ""
+      fail_on_findings:
+        description: Fail the check on ZAP FAIL alerts. Warnings stay non-blocking.
+        required: false
+        type: boolean
+        default: false
+      zap_image:
+        description: OWASP ZAP container image.
+        required: false
+        type: string
+        default: "ghcr.io/zaproxy/zaproxy:2.17.0"
+
+permissions:
+  contents: read
+
+jobs:
+  zap:
+    name: ZAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Baseline scan
+        env:
+          TARGET_URL: ${{ inputs.target_url }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
+          ZAP_IMAGE: ${{ inputs.zap_image }}
+        run: |
+          if [ -z "$TARGET_URL" ]; then
+            echo "Nothing to scan: no target URL." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! [[ "$TARGET_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+            echo "Target URL must start with http:// or https://."
+            exit 1
+          fi
+          mkdir -p zap-reports
+          chmod 777 zap-reports
+          set +e
+          docker run --rm -v "$PWD/zap-reports:/zap/wrk:rw" \
+            "$ZAP_IMAGE" zap-baseline.py \
+            -t "$TARGET_URL" \
+            -I \
+            -r zap-report.html \
+            -J zap-report.json
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "No ZAP FAIL alerts for ${TARGET_URL}." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$rc" -eq 1 ] || [ "$rc" -eq 2 ]; then
+            echo "ZAP baseline findings for ${TARGET_URL} are in the report." | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+              exit "$rc"
+            fi
+            echo "The check does not fail on these findings until fail_on_findings is true." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "ZAP baseline scan failed for ${TARGET_URL}." | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: zap-report
+          path: zap-reports/
+          if-no-files-found: ignore

@@ -26,9 +26,10 @@ Semgrep, Trivy, and ZAP are the merge checks. Gitleaks runs on every pull reques
 - Each tool has its own workflow, so a team can turn a check on or off without editing the others.
 - Application repositories call these workflows with GitHub Actions `workflow_call`. A failed required check blocks the pull request.
 - Semgrep and Trivy run on every pull request. They do not need a deployed application.
+- Semgrep runs on every pull request with the Semgrep CLI and the `p/default` rules. An ERROR finding fails the check. Metrics are off.
 - Gitleaks runs on every pull request and scans the full git history. A finding fails the check. The default rules live in `.gitleaks.toml`.
 - Trivy runs on every pull request as one check with three steps: `trivy fs` for dependency files, `trivy image` for container images, and `trivy config` for other config. A missing target is reported as nothing to scan and does not fail the check. A HIGH or CRITICAL finding fails the check.
-- ZAP runs against a preview or staging URL. It starts in baseline mode so the first scans report findings without failing the build on unreviewed noise. It becomes a required check after the rules are tuned.
+- ZAP runs `zap-baseline.py` against a preview or staging URL. Warnings do not fail the check. FAIL alerts are reported and do not fail the check until `fail_on_findings` is turned on.
 - Scan output is uploaded to DefectDojo. GitHub status checks decide pass or fail. DefectDojo is the system of record for triage.
 - Code quality and test coverage stay with the application test job for now. This stack does not measure coverage and is not a substitute for a quality platform such as SonarQube. A later workflow can add that gate in the same repository.
 
@@ -61,7 +62,7 @@ An application repository only adds a short caller workflow. It does not vendor 
 
 ![Architecture](Doc/architecture.png)
 
-ZAP is skipped until the caller passes a target URL. Semgrep, Trivy, and Gitleaks always run.
+ZAP reports nothing to scan until the caller passes a target URL. Semgrep, Trivy, and Gitleaks always run.
 
 ```mermaid
 sequenceDiagram
@@ -88,6 +89,7 @@ A caller workflow in the application repository, limited to inputs such as the l
 ```yaml
 jobs:
   semgrep:
+    name: Semgrep
     uses: kcmchandramouli/edf/.github/workflows/semgrep.yml@master
   gitleaks:
     name: Gitleaks
@@ -96,10 +98,11 @@ jobs:
     name: Trivy
     uses: kcmchandramouli/edf/.github/workflows/trivy.yml@master
   zap:
+    name: ZAP
     if: ${{ inputs.target_url != '' }}
     uses: kcmchandramouli/edf/.github/workflows/zap.yml@master
     with:
       target_url: ${{ inputs.target_url }}
 ```
 
-Those `uses` paths are the intended contract. Gitleaks and Trivy are in place. The other workflow files are part of the next implementation phase.
+Those `uses` paths are the intended contract. Semgrep, Gitleaks, Trivy, and ZAP are in place. DefectDojo import is part of the next implementation phase.
