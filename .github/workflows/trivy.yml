@@ -1,0 +1,241 @@
+name: Trivy
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: Extra image names to scan, separated by commas.
+        required: false
+        type: string
+        default: ""
+      severity:
+        description: Severities that fail the check.
+        required: false
+        type: string
+        default: "HIGH,CRITICAL"
+      trivy_version:
+        description: Trivy release version.
+        required: false
+        type: string
+        default: "0.75.0"
+      config_path:
+        description: Optional Trivy config in the application repository.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v6
+
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: ${{ inputs.trivy_version }}
+        run: |
+          version="$TRIVY_VERSION"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid trivy version: $version"
+            exit 1
+          fi
+          asset="trivy_${version}_Linux-64bit.tar.gz"
+          curl -sSfL -o "/tmp/${asset}" "https://github.com/aquasecurity/trivy/releases/download/v${version}/${asset}"
+          curl -sSfL -o /tmp/trivy_checksums.txt "https://github.com/aquasecurity/trivy/releases/download/v${version}/trivy_${version}_checksums.txt"
+          line=$(grep " ${asset}$" /tmp/trivy_checksums.txt)
+          if [ -z "$line" ]; then
+            echo "Checksum entry not found for ${asset}"
+            exit 1
+          fi
+          printf '%s\n' "$line" | (cd /tmp && sha256sum -c -)
+          tar -xzf "/tmp/${asset}" -C /usr/local/bin trivy
+          trivy version
+
+      - name: Scan files, images, and other config
+        env:
+          TRIVY_IMAGES: ${{ inputs.images }}
+          TRIVY_SEVERITY: ${{ inputs.severity }}
+          TRIVY_CONFIG: ${{ inputs.config_path }}
+        run: |
+          set -uo pipefail
+          mkdir -p trivy-reports
+          failed=0
+          report_n=0
+
+          say() {
+            printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+
+          config_args=()
+          if [ -n "$TRIVY_CONFIG" ]; then
+            config_args=(--config "$TRIVY_CONFIG")
+          fi
+
+          list_files() {
+            find . \
+              \( -path './.git' -o -path './.edf' -o -name node_modules -o -name vendor -o -name target -o -name dist -o -name .terraform \) -prune \
+              -o -type f "$@" -print
+          }
+
+          record() {
+            local label="$1"
+            local report="$2"
+            local rc="$3"
+            local err="$4"
+            if [ "$rc" -eq 0 ]; then
+              say "No ${TRIVY_SEVERITY} findings in ${label}."
+              return
+            fi
+            if [ "$rc" -eq 1 ]; then
+              failed=1
+              say "Findings in ${label}:"
+              jq -r '
+                .Results[]? | .Target as $t |
+                (.Vulnerabilities[]? | "\(.Severity) \($t) \(.VulnerabilityID) \(.Title)"),
+                (.Misconfigurations[]? | select(.Status != "PASS") | "\(.Severity) \($t) \(.ID) \(.Title)")
+              ' "$report" 2>/dev/null | head -n 30 | while IFS= read -r line; do
+                say "- ${line}"
+              done || true
+              return
+            fi
+            if printf '%s' "$err" | grep -Eiq 'manifest unknown|not found|does not exist|NAME_UNKNOWN|no such image|failed to find the specified image'; then
+              say "Nothing to scan: ${label} is not available."
+              return
+            fi
+            printf '%s\n' "$err"
+            failed=1
+            say "Scan failed for ${label}."
+          }
+
+          run_scan() {
+            local label="$1"
+            shift
+            report_n=$((report_n + 1))
+            local report="trivy-reports/${report_n}.json"
+            local err
+            err=$(mktemp)
+            set +e
+            trivy "$@" \
+              "${config_args[@]}" \
+              --severity "$TRIVY_SEVERITY" \
+              --exit-code 1 \
+              --format json \
+              --output "$report" \
+              --quiet \
+              2>"$err"
+            local rc=$?
+            cat "$err"
+            record "$label" "$report" "$rc" "$(cat "$err")"
+            rm -f "$err"
+          }
+
+          say "## Trivy"
+          say ""
+          say "### Files"
+          mapfile -t manifests < <(list_files \( \
+            -name pom.xml -o -name build.gradle -o -name build.gradle.kts \
+            -o -name package-lock.json -o -name yarn.lock -o -name pnpm-lock.yaml \
+            -o -name go.mod -o -name go.sum \
+            -o -name requirements.txt -o -name Pipfile.lock -o -name poetry.lock -o -name uv.lock \
+            -o -name Cargo.lock -o -name composer.lock -o -name Gemfile.lock \
+            -o -name packages.lock.json -o -name pubspec.lock -o -name mix.lock \
+            -o -name '*.csproj' \
+            \))
+          if [ "${#manifests[@]}" -eq 0 ]; then
+            say "Nothing to scan: no dependency files found."
+          else
+            say "Scanning ${#manifests[@]} dependency file(s)."
+            printf -- '- %s\n' "${manifests[@]}" | head -n 30 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            run_scan "dependency files" fs --scanners vuln \
+              --skip-dirs .git,.edf,node_modules,vendor,target,dist,.terraform \
+              .
+          fi
+
+          say ""
+          say "### Docker images"
+          mapfile -t dockerfiles < <(list_files \( -name Dockerfile -o -name 'Dockerfile.*' -o -name '*.Dockerfile' \))
+          mapfile -t image_refs < <(
+            {
+              printf '%s\n' "$TRIVY_IMAGES" | tr ',' '\n'
+              for file in "${dockerfiles[@]}"; do
+                [ -f "$file" ] || continue
+                grep -E '^[[:space:]]*FROM[[:space:]]+' "$file" || true
+              done
+              while IFS= read -r file; do
+                case "$file" in
+                  ./.github/*) continue ;;
+                esac
+                grep -E '^[[:space:]]*-?[[:space:]]*image:[[:space:]]+' "$file" || true
+              done < <(list_files \( -name '*.yml' -o -name '*.yaml' \))
+            } | while IFS= read -r line; do
+              line="${line%%#*}"
+              line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*-?[[:space:]]*image:[[:space:]]+//; s/^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?//; s/[[:space:]]+[Aa][Ss][[:space:]].*$//; s/[[:space:]]+$//; s/^["'\'']//; s/["'\'']$//')"
+              [ -n "$line" ] || continue
+              case "$line" in
+                scratch|*[\$\{]*) continue ;;
+              esac
+              printf '%s\n' "$line"
+            done | sort -u
+          )
+          if [ "${#dockerfiles[@]}" -eq 0 ] && [ "${#image_refs[@]}" -eq 0 ]; then
+            say "Nothing to scan: no Docker image found."
+          else
+            if [ "${#dockerfiles[@]}" -gt 0 ]; then
+              say "Scanning ${#dockerfiles[@]} Dockerfile(s)."
+              printf -- '- %s\n' "${dockerfiles[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              for file in "${dockerfiles[@]}"; do
+                run_scan "$file" fs --scanners misconfig "$file"
+              done
+            fi
+            if [ "${#image_refs[@]}" -eq 0 ]; then
+              say "Nothing to scan: no Docker image reference found."
+            else
+              say "Scanning ${#image_refs[@]} Docker image(s)."
+              printf -- '- %s\n' "${image_refs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              for image in "${image_refs[@]}"; do
+                run_scan "$image" image --scanners vuln "$image"
+              done
+            fi
+          fi
+
+          say ""
+          say "### Others"
+          mapfile -t others < <(
+            list_files \( -name '*.tf' -o -name '*.tf.json' -o -name Chart.yaml -o -name kustomization.yaml -o -name kustomization.yml \)
+            while IFS= read -r file; do
+              case "$file" in
+                ./.github/*) continue ;;
+              esac
+              if grep -Eq '^[[:space:]]*apiVersion:[[:space:]]+' "$file" && grep -Eq '^[[:space:]]*kind:[[:space:]]+' "$file"; then
+                printf '%s\n' "$file"
+              elif grep -Eq 'AWSTemplateFormatVersion' "$file"; then
+                printf '%s\n' "$file"
+              fi
+            done < <(list_files \( -name '*.yml' -o -name '*.yaml' \))
+          )
+          mapfile -t others < <(printf '%s\n' "${others[@]}" | sed '/^$/d' | sort -u)
+          if [ "${#others[@]}" -eq 0 ]; then
+            say "Nothing to scan: no other config files found."
+          else
+            say "Scanning ${#others[@]} other config file(s)."
+            printf -- '- %s\n' "${others[@]}" | head -n 30 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            for file in "${others[@]}"; do
+              run_scan "$file" fs --scanners misconfig "$file"
+            done
+          fi
+
+          exit "$failed"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-reports
+          path: trivy-reports/
+          if-no-files-found: ignore
