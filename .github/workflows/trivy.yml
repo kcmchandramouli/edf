@@ -71,6 +71,7 @@ jobs:
           set +e
           trivy "${args[@]}" fs \
             --scanners vuln \
+            --offline-scan \
             --severity "$TRIVY_SEVERITY" \
             --exit-code 1 \
             --skip-dirs .git,node_modules,vendor,target,dist,.terraform \
@@ -86,7 +87,11 @@ jobs:
             echo "No ${TRIVY_SEVERITY} findings in dependency files." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "Findings in dependency files." | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -eq 1 ]; then
+            echo "Findings in dependency files." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Dependency file scan failed." | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
       - name: Scan images
@@ -135,21 +140,23 @@ jobs:
           printf -- '- %s\n' "${image_refs[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           failed=0
           for image in "${image_refs[@]}"; do
+            safe=$(printf '%s' "$image" | tr -c 'A-Za-z0-9._-' '_')
+            report="trivy-reports/image-${safe}.txt"
             set +e
             trivy "${args[@]}" image \
               --scanners vuln \
               --severity "$TRIVY_SEVERITY" \
               --exit-code 1 \
-              "$image" > "trivy-reports/image-${image//\//_}.txt" 2>&1
+              "$image" > "$report" 2>&1
             rc=$?
             set -e
-            cat "trivy-reports/image-${image//\//_}.txt" | tee -a trivy-reports/images.txt
+            cat "$report" | tee -a trivy-reports/images.txt
             if [ "$rc" -eq 0 ]; then
               echo "No ${TRIVY_SEVERITY} findings in ${image}." | tee -a "$GITHUB_STEP_SUMMARY"
             elif [ "$rc" -eq 1 ]; then
               echo "Findings in ${image}." | tee -a "$GITHUB_STEP_SUMMARY"
               failed=1
-            elif grep -Eiq 'manifest unknown|not found|does not exist|NAME_UNKNOWN|no such image' "trivy-reports/image-${image//\//_}.txt"; then
+            elif grep -Eiq 'manifest unknown|not found|does not exist|NAME_UNKNOWN|no such image' "$report"; then
               echo "Nothing to scan: ${image} is not available." | tee -a "$GITHUB_STEP_SUMMARY"
             else
               echo "Scan failed for ${image}." | tee -a "$GITHUB_STEP_SUMMARY"
